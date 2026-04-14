@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,8 @@ class MarkerExtractor:
         if self._converter is not None:
             return self._converter
 
+        self._configure_cache_environment()
+
         try:
             from marker.config.parser import ConfigParser
             from marker.converters.pdf import PdfConverter
@@ -88,6 +91,22 @@ class MarkerExtractor:
             llm_service=config_parser.get_llm_service(),
         )
         return self._converter
+
+    def _configure_cache_environment(self) -> None:
+        model_cache_dir = self.settings.model_cache_dir.resolve()
+        cache_root = model_cache_dir.parent
+        huggingface_root = cache_root / "huggingface"
+
+        model_cache_dir.mkdir(parents=True, exist_ok=True)
+        huggingface_root.mkdir(parents=True, exist_ok=True)
+        (huggingface_root / "hub").mkdir(parents=True, exist_ok=True)
+        (cache_root / "torch").mkdir(parents=True, exist_ok=True)
+
+        os.environ["MODEL_CACHE_DIR"] = str(model_cache_dir)
+        os.environ.setdefault("HF_HOME", str(huggingface_root))
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(huggingface_root / "hub"))
+        os.environ.setdefault("TORCH_HOME", str(cache_root / "torch"))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
 
     def _save_images(
         self,

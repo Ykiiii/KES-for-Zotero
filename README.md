@@ -53,6 +53,10 @@ kes-zotero --storage-root E:/Zotero/storage --output-root ./output
 - `assets/`：Marker 导出的图像资源
 - `marker/`：原始 Marker Markdown
 
+项目根目录下默认还会生成：
+
+- `.cache-marker/`：Marker 与 Surya 的本地模型缓存，不会被 git 同步
+
 顶层还会生成 `manifest.json`，记录每个条目的处理状态。
 
 ## 配置说明
@@ -61,6 +65,8 @@ kes-zotero --storage-root E:/Zotero/storage --output-root ./output
 
 - Marker LLM：用于增强公式、表格与复杂版面解析
 - Vision LLM：用于图像分级、保留决策与中文摘要
+
+另外，Marker 底层依赖的版面分析与 OCR 模型仍需本地缓存。默认缓存目录可通过 `marker.model_cache_dir` 配置到项目内，例如 `./.cache-marker/models`。
 
 如果你不希望 Vision LLM 处理图像，可增加 `--disable-vision`。
 

@@ -15,6 +15,7 @@ class MarkerSettings:
     llm_service: str = "marker.services.ollama.OllamaService"
     strip_existing_ocr: bool = False
     page_range: str | None = None
+    model_cache_dir: Path = Path(".cache-marker/models")
 
 
 @dataclass(slots=True)
@@ -54,6 +55,13 @@ def _coerce_path(value: str | Path | None, fallback: Path | None = None) -> Path
     return Path(value).expanduser()
 
 
+def _coerce_optional_path(value: str | Path | None, base_dir: Path, fallback: Path) -> Path:
+    path = _coerce_path(value, fallback)
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
+
+
 def build_config(
     *,
     config_path: Path | None,
@@ -64,6 +72,7 @@ def build_config(
     item_model: str | None,
 ) -> AppConfig:
     file_config = _load_json_config(config_path) if config_path else {}
+    config_base_dir = config_path.parent.resolve() if config_path else Path.cwd()
 
     marker_config = file_config.get("marker", {})
     vision_config = file_config.get("vision", {})
@@ -76,6 +85,11 @@ def build_config(
         llm_service=marker_config.get("llm_service", "marker.services.ollama.OllamaService"),
         strip_existing_ocr=marker_config.get("strip_existing_ocr", False),
         page_range=marker_config.get("page_range"),
+        model_cache_dir=_coerce_optional_path(
+            marker_config.get("model_cache_dir"),
+            config_base_dir,
+            Path(".cache-marker/models"),
+        ),
     )
 
     vision_enabled = vision_config.get("enabled", True)

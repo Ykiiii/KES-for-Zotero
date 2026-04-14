@@ -8,7 +8,8 @@
     "ollama_model": "gemma4:latest",
     "llm_service": "marker.services.ollama.OllamaService",
     "strip_existing_ocr": false,
-    "page_range": null
+    "page_range": null,
+    "model_cache_dir": "./.cache-marker/models"
   },
   "vision": {
     "enabled": true,
