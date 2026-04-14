@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import base64
+import binascii
+import re
+from pathlib import Path
+from typing import Any
+
+from kes_for_zotero.config import MarkerSettings, VisionSettings
+from kes_for_zotero.models import ExtractedImage, MarkerResult
+
+ABSTRACT_ALIASES = {"abstract", "摘要"}
+CONCLUSION_KEYWORDS = {"conclusion", "conclusions", "结论", "summary and conclusion"}
+
+
+class MarkerExtractor:
+    def __init__(self, settings: MarkerSettings) -> None:
+        self.settings = settings
+        self._converter: Any | None = None
+
+    def extract(self, pdf_path: Path, item_output_dir: Path) -> MarkerResult:
+        item_output_dir.mkdir(parents=True, exist_ok=True)
+        marker_dir = item_output_dir / "marker"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+
+        rendered = self._get_converter()(str(pdf_path))
+
+        markdown = getattr(rendered, "markdown", "") or ""
+        metadata = getattr(rendered, "metadata", {}) or {}
+        images = getattr(rendered, "images", {}) or {}
+
+        markdown_path = marker_dir / f"{pdf_path.stem}.marker.md"
+        markdown_path.write_text(markdown, encoding="utf-8")
+
+        asset_root = item_output_dir / "assets" / pdf_path.stem
+        extracted_images = self._save_images(images, markdown, asset_root, item_output_dir)
+
+        return MarkerResult(
+            pdf_path=pdf_path,
+            markdown_path=markdown_path,
+            markdown=markdown,
+            metadata=metadata,
+            images=extracted_images,
+            abstract=extract_named_section(markdown, ABSTRACT_ALIASES),
+            conclusion=extract_conclusion(markdown),
+        )
+
+    def candidate_images(self, result: MarkerResult, vision: VisionSettings) -> list[ExtractedImage]:
+        candidates = [
+            image
+            for image in result.images
+            if image.width * image.height >= vision.min_image_area
+            and min(image.width, image.height) >= vision.min_short_side
+        ]
+        return candidates[: vision.max_candidate_images]
+
+    def _get_converter(self) -> Any:
+        if self._converter is not None:
+            return self._converter
+
+        try:
+            from marker.config.parser import ConfigParser
+            from marker.converters.pdf import PdfConverter
+            from marker.models import create_model_dict
+        except ImportError as exc:
+            raise RuntimeError(
+                "Marker is not installed. Run 'pip install -e .' and ensure marker-pdf is available."
+            ) from exc
+
+        config: dict[str, Any] = {
+            "output_format": "markdown",
+            "force_ocr": self.settings.force_ocr,
+            "use_llm": self.settings.use_llm,
+            "strip_existing_ocr": self.settings.strip_existing_ocr,
+            "ollama_base_url": self.settings.ollama_base_url,
+            "ollama_model": self.settings.ollama_model,
+            "llm_service": self.settings.llm_service,
+        }
+        if self.settings.page_range:
+            config["page_range"] = self.settings.page_range
+
+        config_parser = ConfigParser(config)
+        self._converter = PdfConverter(
+            config=config_parser.generate_config_dict(),
+            artifact_dict=create_model_dict(),
+            processor_list=config_parser.get_processors(),
+            renderer=config_parser.get_renderer(),
+            llm_service=config_parser.get_llm_service(),
+        )
+        return self._converter
+
+    def _save_images(
+        self,
+        images: dict[str, Any],
+        markdown: str,
+        asset_root: Path,
+        item_output_dir: Path,
+    ) -> list[ExtractedImage]:
+        asset_root.mkdir(parents=True, exist_ok=True)
+        extracted: list[ExtractedImage] = []
+
+        for raw_name, image_obj in images.items():
+            safe_name = sanitize_asset_name(raw_name)
+            output_path = asset_root / safe_name
+            save_image_object(output_path, image_obj)
+            width, height = inspect_image_size(output_path)
+            relative_path = output_path.relative_to(item_output_dir).as_posix()
+            context_excerpt = find_image_context(markdown, raw_name, safe_name)
+            extracted.append(
+                ExtractedImage(
+                    path=output_path,
+                    relative_path=relative_path,
+                    width=width,
+                    height=height,
+                    context_excerpt=context_excerpt,
+                )
+            )
+
+        return extracted
+
+
+def sanitize_asset_name(raw_name: str) -> str:
+    candidate = Path(raw_name).name or raw_name
+    if "." not in candidate:
+        candidate = candidate + ".png"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", candidate)
+
+
+def save_image_object(output_path: Path, image_obj: Any) -> None:
+    if hasattr(image_obj, "save"):
+        image_obj.save(output_path)
+        return
+    if isinstance(image_obj, bytes):
+        output_path.write_bytes(image_obj)
+        return
+    if isinstance(image_obj, str):
+        try:
+            output_path.write_bytes(base64.b64decode(image_obj, validate=True))
+            return
+        except (ValueError, binascii.Error):
+            output_path.write_text(image_obj, encoding="utf-8")
+            return
+    if hasattr(image_obj, "getvalue"):
+        output_path.write_bytes(image_obj.getvalue())
+        return
+    raise TypeError(f"Unsupported image payload type: {type(image_obj)!r}")
+
+
+def inspect_image_size(image_path: Path) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError:
+        return 0, 0
+
+    try:
+        with Image.open(image_path) as image:
+            return image.size
+    except OSError:
+        return 0, 0
+
+
+def extract_named_section(markdown: str, aliases: set[str]) -> str | None:
+    headings = list(iter_headings(markdown))
+    if not headings:
+        return None
+
+    lines = markdown.splitlines()
+    for index, level, title in headings:
+        normalized = normalize_heading(title)
+        if normalized in aliases:
+            section_lines: list[str] = []
+            for next_index in range(index + 1, len(lines)):
+                next_line = lines[next_index]
+                if next_line.startswith("#"):
+                    match = re.match(r"^(#+)\s+(.+)$", next_line)
+                    if match and len(match.group(1)) <= level:
+                        break
+                section_lines.append(next_line)
+            content = "\n".join(section_lines).strip()
+            return content or None
+    return None
+
+
+def extract_conclusion(markdown: str) -> str | None:
+    headings = list(iter_headings(markdown))
+    if not headings:
+        return None
+
+    lines = markdown.splitlines()
+    for index, level, title in headings:
+        normalized = normalize_heading(title)
+        if any(keyword in normalized for keyword in CONCLUSION_KEYWORDS):
+            section_lines: list[str] = []
+            for next_index in range(index + 1, len(lines)):
+                next_line = lines[next_index]
+                if next_line.startswith("#"):
+                    match = re.match(r"^(#+)\s+(.+)$", next_line)
+                    if match and len(match.group(1)) <= level:
+                        break
+                section_lines.append(next_line)
+            content = "\n".join(section_lines).strip()
+            return content or None
+    return None
+
+
+def iter_headings(markdown: str):
+    for index, line in enumerate(markdown.splitlines()):
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match:
+            yield index, len(match.group(1)), match.group(2)
+
+
+def normalize_heading(value: str) -> str:
+    lowered = value.strip().lower()
+    lowered = re.sub(r"[^a-z0-9\u4e00-\u9fff\s]", "", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def find_image_context(markdown: str, raw_name: str, safe_name: str, window: int = 2) -> str:
+    lines = markdown.splitlines()
+    probes = {raw_name, Path(raw_name).name, safe_name, Path(safe_name).stem}
+    for index, line in enumerate(lines):
+        if any(probe and probe in line for probe in probes):
+            start = max(0, index - window)
+            end = min(len(lines), index + window + 1)
+            return "\n".join(lines[start:end]).strip()
+    return ""

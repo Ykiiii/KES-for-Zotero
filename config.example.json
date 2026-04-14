@@ -1,0 +1,23 @@
+{
+  "storage_root": "E:\\program\\ZoteroPaper\\storage",
+  "output_root": "./output",
+  "marker": {
+    "force_ocr": true,
+    "use_llm": true,
+    "ollama_base_url": "http://10.33.2.222:80",
+    "ollama_model": "gemma4:latest",
+    "llm_service": "marker.services.ollama.OllamaService",
+    "strip_existing_ocr": false,
+    "page_range": null
+  },
+  "vision": {
+    "enabled": true,
+    "base_url": "http://10.33.2.222:80",
+    "model": "gemma4:latest",
+    "temperature": 0.1,
+    "include_level3": false,
+    "max_candidate_images": 24,
+    "min_image_area": 50000,
+    "min_short_side": 160
+  }
+}

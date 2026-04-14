@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kes-for-zotero"
+version = "0.1.0"
+description = "Extract Zotero storage PDFs and related files into structured Markdown with Marker and a local vision model."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Ykiiii" }
+]
+dependencies = [
+  "marker-pdf>=1.10.0"
+]
+
+[project.scripts]
+kes-zotero = "kes_for_zotero.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.11.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

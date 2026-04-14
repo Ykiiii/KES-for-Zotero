@@ -1,0 +1,14 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "chat.tools.terminal.autoApprove": {
+        "/^\\$env:PYTHONPATH='C:\\\\Users\\\\YangK\\\\AppData\\\\Roaming\\\\Python\\\\Python311\\\\site-packages;E:\\\\Document\\\\KES-for-Zotero\\\\src'; E:/program/anaconda3/Scripts/conda\\.exe run -n yk_quan --no-capture-output python -c \"import torch, torchvision, marker, kes_for_zotero; print\\('TORCH', torch\\.__version__, torch\\.__file__\\); print\\('TV', torchvision\\.__version__, torchvision\\.__file__\\); print\\('IMPORT_OK'\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^\\$env:PYTHONPATH='C:\\\\Users\\\\YangK\\\\AppData\\\\Roaming\\\\Python\\\\Python311\\\\site-packages;E:\\\\Document\\\\KES-for-Zotero\\\\src'; E:/program/anaconda3/Scripts/conda\\.exe run -n yk_quan --no-capture-output python -m kes_for_zotero --config config\\.example\\.json --item-key 23QMG87U --disable-vision --log-level INFO$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
