@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ from kes_for_zotero.models import ExtractedImage, MarkerResult
 
 ABSTRACT_ALIASES = {"abstract", "摘要"}
 CONCLUSION_KEYWORDS = {"conclusion", "conclusions", "结论", "summary and conclusion"}
+_CONVERTER_INIT_LOCK = threading.Lock()
 
 
 class MarkerExtractor:
@@ -47,50 +50,93 @@ class MarkerExtractor:
         )
 
     def candidate_images(self, result: MarkerResult, vision: VisionSettings) -> list[ExtractedImage]:
-        candidates = [
-            image
-            for image in result.images
-            if image.width * image.height >= vision.min_image_area
-            and min(image.width, image.height) >= vision.min_short_side
-        ]
-        return candidates[: vision.max_candidate_images]
+        filtered: list[tuple[int, int, ExtractedImage]] = []
+        seen_hashes: set[str] = set()
+
+        for image in result.images:
+            width = max(0, image.width)
+            height = max(0, image.height)
+            area = width * height
+            if area < vision.min_image_area:
+                continue
+            if vision.max_image_area is not None and area > vision.max_image_area:
+                continue
+            if min(width, height) < vision.min_short_side:
+                continue
+
+            aspect_ratio = _safe_aspect_ratio(width, height)
+            if aspect_ratio < vision.min_aspect_ratio or aspect_ratio > vision.max_aspect_ratio:
+                continue
+
+            normalized_context = image.context_excerpt.lower()
+            if _contains_any(normalized_context, vision.drop_context_keywords):
+                continue
+
+            if vision.deduplicate_images:
+                digest = _image_digest(image.path)
+                if digest in seen_hashes:
+                    continue
+                seen_hashes.add(digest)
+
+            priority = 1 if _contains_any(normalized_context, vision.prefer_context_keywords) else 0
+            filtered.append((priority, area, image))
+
+        filtered.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in filtered[: vision.max_candidate_images]]
 
     def _get_converter(self) -> Any:
         if self._converter is not None:
             return self._converter
 
-        self._configure_cache_environment()
+        with _CONVERTER_INIT_LOCK:
+            if self._converter is not None:
+                return self._converter
 
-        try:
-            from marker.config.parser import ConfigParser
-            from marker.converters.pdf import PdfConverter
-            from marker.models import create_model_dict
-        except ImportError as exc:
-            raise RuntimeError(
-                "Marker is not installed. Run 'pip install -e .' and ensure marker-pdf is available."
-            ) from exc
+            self._configure_cache_environment()
 
-        config: dict[str, Any] = {
-            "output_format": "markdown",
-            "force_ocr": self.settings.force_ocr,
-            "use_llm": self.settings.use_llm,
-            "strip_existing_ocr": self.settings.strip_existing_ocr,
-            "ollama_base_url": self.settings.ollama_base_url,
-            "ollama_model": self.settings.ollama_model,
-            "llm_service": self.settings.llm_service,
-        }
-        if self.settings.page_range:
-            config["page_range"] = self.settings.page_range
+            try:
+                from marker.config.parser import ConfigParser
+                from marker.converters.pdf import PdfConverter
+                from marker.models import create_model_dict
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Failed to import Marker runtime dependencies. "
+                    "Please verify marker-pdf, torch, torchvision, and transformers compatibility. "
+                    f"Original error: {exc}"
+                ) from exc
 
-        config_parser = ConfigParser(config)
-        self._converter = PdfConverter(
-            config=config_parser.generate_config_dict(),
-            artifact_dict=create_model_dict(),
-            processor_list=config_parser.get_processors(),
-            renderer=config_parser.get_renderer(),
-            llm_service=config_parser.get_llm_service(),
-        )
-        return self._converter
+            config: dict[str, Any] = {
+                "output_format": "markdown",
+                "force_ocr": self.settings.force_ocr,
+                "use_llm": self.settings.use_llm,
+                "strip_existing_ocr": self.settings.strip_existing_ocr,
+                "ollama_base_url": self.settings.ollama_base_url,
+                "ollama_model": self.settings.ollama_model,
+                "llm_service": self.settings.llm_service,
+            }
+            if self.settings.page_range:
+                config["page_range"] = self.settings.page_range
+
+            config_parser = ConfigParser(config)
+            try:
+                self._converter = PdfConverter(
+                    config=config_parser.generate_config_dict(),
+                    artifact_dict=create_model_dict(),
+                    processor_list=config_parser.get_processors(),
+                    renderer=config_parser.get_renderer(),
+                    llm_service=config_parser.get_llm_service(),
+                )
+            except NotImplementedError as exc:
+                message = str(exc)
+                raise RuntimeError(
+                    "Marker model initialization failed while moving model to target device. "
+                    "This often happens with concurrent heavy model loads on multi-GPU hosts. "
+                    "Try reducing --parallel-workers to match --gpu-devices count (or set to 1), "
+                    "then rerun. "
+                    f"Original error: {message}"
+                ) from exc
+
+            return self._converter
 
     def _configure_cache_environment(self) -> None:
         model_cache_dir = self.settings.model_cache_dir.resolve()
@@ -107,6 +153,12 @@ class MarkerExtractor:
         os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(huggingface_root / "hub"))
         os.environ.setdefault("TORCH_HOME", str(cache_root / "torch"))
         os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
+        os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+        # On Windows + MKL, limiting thread count avoids known KMeans memory leak in marker pipeline.
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
 
     def _save_images(
         self,
@@ -244,3 +296,29 @@ def find_image_context(markdown: str, raw_name: str, safe_name: str, window: int
             end = min(len(lines), index + window + 1)
             return "\n".join(lines[start:end]).strip()
     return ""
+
+
+def _safe_aspect_ratio(width: int, height: int) -> float:
+    if width <= 0 or height <= 0:
+        return 0.0
+    return max(width / height, height / width)
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    if not text or not keywords:
+        return False
+    return any(keyword and keyword.lower() in text for keyword in keywords)
+
+
+def _image_digest(path: Path) -> str:
+    hasher = hashlib.sha1()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+    except OSError:
+        return path.as_posix()
+    return hasher.hexdigest()

@@ -11,11 +11,16 @@ class ZoteroRelatedFile:
     kind: str
     size_bytes: int
     preview: str | None = None
+    structured_fields: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class ZoteroItem:
     item_key: str
+    citation_key: str
+    title: str
+    year: str | None
+    first_author: str | None
     item_dir: Path
     pdf_files: list[Path]
     related_files: list[ZoteroRelatedFile]

@@ -28,6 +28,41 @@ class VisionSettings:
     max_candidate_images: int = 24
     min_image_area: int = 50_000
     min_short_side: int = 160
+    max_image_area: int | None = None
+    min_aspect_ratio: float = 0.2
+    max_aspect_ratio: float = 6.0
+    deduplicate_images: bool = True
+    drop_context_keywords: tuple[str, ...] = ()
+    prefer_context_keywords: tuple[str, ...] = (
+        "figure",
+        "fig",
+        "architecture",
+        "pipeline",
+        "framework",
+        "result",
+        "ablation",
+        "comparison",
+        "table",
+        "图",
+        "结果",
+        "架构",
+        "流程",
+        "对比",
+    )
+
+
+@dataclass(slots=True)
+class RunSettings:
+    resume: bool = True
+    show_progress: bool = True
+    retry_attempts: int = 1
+    force_reprocess: bool = False
+    strict_fail: bool = False
+    parallel_workers: int = 1
+    suppress_internal_progress: bool = True
+    sample_size: int | None = None
+    gpu_mode: str = "single"
+    gpu_devices: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -36,6 +71,7 @@ class AppConfig:
     output_root: Path
     marker: MarkerSettings = field(default_factory=MarkerSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
+    run: RunSettings = field(default_factory=RunSettings)
 
     @property
     def manifest_path(self) -> Path:
@@ -70,12 +106,22 @@ def build_config(
     include_level3: bool | None,
     disable_vision: bool,
     item_model: str | None,
+    enable_resume: bool | None = None,
+    enable_progress: bool | None = None,
+    retry_attempts: int | None = None,
+    force_reprocess: bool | None = None,
+    strict_fail: bool | None = None,
+    parallel_workers: int | None = None,
+    sample_size: int | None = None,
+    gpu_mode: str | None = None,
+    gpu_devices: tuple[int, ...] | None = None,
 ) -> AppConfig:
     file_config = _load_json_config(config_path) if config_path else {}
     config_base_dir = config_path.parent.resolve() if config_path else Path.cwd()
 
     marker_config = file_config.get("marker", {})
     vision_config = file_config.get("vision", {})
+    run_config = file_config.get("run", {})
 
     marker = MarkerSettings(
         force_ocr=marker_config.get("force_ocr", True),
@@ -105,11 +151,86 @@ def build_config(
         max_candidate_images=vision_config.get("max_candidate_images", 24),
         min_image_area=vision_config.get("min_image_area", 50_000),
         min_short_side=vision_config.get("min_short_side", 160),
+        max_image_area=vision_config.get("max_image_area"),
+        min_aspect_ratio=float(vision_config.get("min_aspect_ratio", 0.2)),
+        max_aspect_ratio=float(vision_config.get("max_aspect_ratio", 6.0)),
+        deduplicate_images=bool(vision_config.get("deduplicate_images", True)),
+        drop_context_keywords=tuple(vision_config.get("drop_context_keywords", [])),
+        prefer_context_keywords=tuple(
+            vision_config.get(
+                "prefer_context_keywords",
+                [
+                    "figure",
+                    "fig",
+                    "architecture",
+                    "pipeline",
+                    "framework",
+                    "result",
+                    "ablation",
+                    "comparison",
+                    "table",
+                    "图",
+                    "结果",
+                    "架构",
+                    "流程",
+                    "对比",
+                ],
+            )
+        ),
     )
 
+    run = RunSettings(
+        resume=bool(enable_resume) if enable_resume is not None else bool(run_config.get("resume", True)),
+        show_progress=bool(enable_progress)
+        if enable_progress is not None
+        else bool(run_config.get("show_progress", True)),
+        retry_attempts=max(
+            0,
+            int(retry_attempts)
+            if retry_attempts is not None
+            else int(run_config.get("retry_attempts", 1)),
+        ),
+        force_reprocess=bool(force_reprocess)
+        if force_reprocess is not None
+        else bool(run_config.get("force_reprocess", False)),
+        strict_fail=bool(strict_fail) if strict_fail is not None else bool(run_config.get("strict_fail", False)),
+        parallel_workers=max(
+            1,
+            int(parallel_workers)
+            if parallel_workers is not None
+            else int(run_config.get("parallel_workers", 1)),
+        ),
+        suppress_internal_progress=bool(run_config.get("suppress_internal_progress", True)),
+        sample_size=(
+            max(1, int(sample_size))
+            if sample_size is not None
+            else (
+                max(1, int(run_config["sample_size"]))
+                if run_config.get("sample_size") is not None
+                else None
+            )
+        ),
+        gpu_mode=(gpu_mode or str(run_config.get("gpu_mode", "single")).strip().lower() or "single"),
+        gpu_devices=(
+            tuple(gpu_devices)
+            if gpu_devices is not None
+            else tuple(int(device) for device in run_config.get("gpu_devices", []) if isinstance(device, int))
+        ),
+    )
+
+    if run.gpu_mode not in {"single", "round-robin"}:
+        raise ValueError("Invalid run.gpu_mode. Supported values: single, round-robin")
+
+    storage_root_value = storage_root or file_config.get("storage_root")
+    if storage_root_value is None:
+        raise ValueError("Missing storage_root. Provide --storage-root or set storage_root in config.")
+
+    output_root_value = output_root or file_config.get("output_root")
+
     return AppConfig(
-        storage_root=_coerce_path(storage_root or file_config.get("storage_root")),
-        output_root=_coerce_path(output_root or file_config.get("output_root"), Path("output")),
+        storage_root=_coerce_optional_path(storage_root_value, config_base_dir, Path(".")),
+        output_root=_coerce_optional_path(output_root_value, config_base_dir, Path("output")),
         marker=marker,
         vision=vision,
+        run=run,
     )

@@ -45,19 +45,166 @@ kes-zotero --config config.example.json
 kes-zotero --storage-root E:/Zotero/storage --output-root ./output
 ```
 
+## 运行模式（bash 示例）
+
+以下示例均假设你已在项目根目录，并已安装依赖。
+
+1. 运行主脚本（推荐入口）
+
+```bash
+kes-zotero --config config.example.json
+```
+
+建议首次先做抽样测试（例如 10 篇）：
+
+```bash
+kes-zotero --config config.example.json --sample-size 10
+```
+
+2. 通过 Python 模块运行主脚本（等价入口）
+
+```bash
+python -m kes_for_zotero.cli --config config.example.json
+```
+
+3. 只处理单篇条目
+
+```bash
+kes-zotero --config config.example.json --item-key 23QMG87U
+```
+
+4. 先自检再执行主流程
+
+```bash
+kes-zotero --config config.example.json --self-check
+```
+
+5. 仅执行自检，不跑转换
+
+```bash
+kes-zotero --config config.example.json --self-check-only
+```
+
+6. 并行处理论文（论文级并行）
+
+```bash
+kes-zotero --config config.example.json --parallel-workers 4
+```
+
+6.1 多 GPU 轮询模式（例如 GPU 0 和 1）
+
+```bash
+kes-zotero --config config.example.json --parallel-workers 4 --gpu-mode round-robin --gpu-devices 0,1
+```
+
+7. 稳定实跑（自检 + 重试）
+
+```bash
+kes-zotero --config config.example.json --self-check --retry-attempts 2
+```
+
+8. 无断点续跑，强制重跑全部条目
+
+```bash
+kes-zotero --config config.example.json --no-resume --force-reprocess
+```
+
+9. 关闭视觉模型（仅 Marker 文本提取）
+
+```bash
+kes-zotero --config config.example.json --disable-vision
+```
+
+10. 严格失败模式（任一 PDF 失败即返回非零退出码）
+
+```bash
+kes-zotero --config config.example.json --strict-fail
+```
+
+11. 关闭进度条输出（适合日志收集）
+
+```bash
+kes-zotero --config config.example.json --no-progress
+```
+
+说明：
+
+- 默认会显示主进度条（论文级）。
+- 当 `--parallel-workers 1` 时，会额外显示当前论文的 PDF 转换进度条（单条简化进度）。
+- 当并行数大于 1 时，为避免多线程输出相互覆盖，仅保留主进度条。
+- 单文献进度条会带心跳刷新（秒级变化），便于判断任务仍在运行中。
+
+## 用户使用方式
+
+典型使用流程：
+
+1. 准备配置
+
+- 复制并修改 `config.example.json`，至少设置 `storage_root`、`output_root`、模型地址。
+
+2. 首次验证（推荐）
+
+```bash
+kes-zotero --config config.example.json --self-check --sample-size 10
+```
+
+3. 小规模转换观察效果
+
+```bash
+kes-zotero --config config.example.json --sample-size 10 --parallel-workers 1
+```
+
+4. 全量批处理
+
+```bash
+kes-zotero --config config.example.json --parallel-workers 4 --retry-attempts 2
+```
+
+多 GPU 主机建议：
+
+```bash
+kes-zotero --config config.example.json --parallel-workers 4 --gpu-mode round-robin --gpu-devices 0,1
+```
+
+注意：当 `parallel-workers` 大于 `gpu-devices` 数量时，程序会自动降到 GPU 数量，避免模型并发装载导致的运行时异常。
+
+5. 出错后重跑
+
+```bash
+kes-zotero --config config.example.json --force-reprocess --strict-fail
+```
+
+输出检索入口：
+
+- 总索引：`output/index/index.md`
+- 单篇聚合入口：`output/index/<citation-key>.md`
+- 论文目录：`output/papper/<citation-key>/`
+- 运行统计：`output/run_stats.json`
+
 ## 输出结构
 
 每个 Zotero 条目会在输出目录下生成一个子目录，包含：
 
 - `index.md`：整合后的 Markdown
+- `<citation-key>.index.md`：带引用标签命名的同内容索引，便于检索与聚合
 - `assets/`：Marker 导出的图像资源
 - `marker/`：原始 Marker Markdown
 
 项目根目录下默认还会生成：
 
+- `output/index/index.md`：总索引表
+- `output/index/<citation-key>.md`：每篇论文的聚合索引入口
+- `output/papper/<citation-key>/`：论文转换结果目录
+
 - `.cache-marker/`：Marker 与 Surya 的本地模型缓存，不会被 git 同步
 
 顶层还会生成 `manifest.json`，记录每个条目的处理状态。
+
+主进度条结束后会额外生成 `run_stats.json`，包含：
+
+- 总条目数、总 PDF 数
+- 有 PDF / 无 PDF 条目数量与清单
+- PDF 成功与失败计数
 
 ## 配置说明
 
@@ -69,6 +216,54 @@ kes-zotero --storage-root E:/Zotero/storage --output-root ./output
 另外，Marker 底层依赖的版面分析与 OCR 模型仍需本地缓存。默认缓存目录可通过 `marker.model_cache_dir` 配置到项目内，例如 `./.cache-marker/models`。
 
 如果你不希望 Vision LLM 处理图像，可增加 `--disable-vision`。
+
+若出现 TensorFlow oneDNN 提示（`TF_ENABLE_ONEDNN_OPTS`），程序会默认设置为关闭优化并降低日志级别，避免重复报警。
+
+若出现类似以下错误（`NotImplementedError`，发生在 `model.to(device)`）：
+
+- 优先将 `--parallel-workers` 调小到与 `--gpu-devices` 数量一致，或先用 `--parallel-workers 1` 验证。
+- 保持 `--gpu-mode round-robin --gpu-devices 0,1,...`，避免单卡过载。
+
+## 稳定实跑模式
+
+推荐用以下组合来提升长任务稳定性：
+
+```bash
+kes-zotero --config config.example.json --self-check --retry-attempts 2
+```
+
+关键参数：
+
+- `--self-check`：先检查 `storage_root`、Ollama 连通性、模型名，再执行主流程
+- `--self-check-only`：只做自检并退出
+- `--retry-attempts N`：PDF 提取与图像分析失败时重试 N 次
+- `--no-resume`：关闭断点续跑
+- `--force-reprocess`：忽略已成功记录并强制重跑
+- `--no-progress`：关闭进度条
+- `--strict-fail`：任一 PDF 失败即返回非零退出码
+- `--parallel-workers N`：按论文级别并行处理，进度条仍按论文计数显示
+- `--sample-size N`：只处理前 N 篇论文，建议先用 10 做抽样验证
+- `--gpu-mode {single,round-robin}`：多 GPU 调度模式
+- `--gpu-devices 0,1,...`：指定可用 GPU 设备列表
+
+## 参数速查
+
+- `--config`：配置文件路径
+- `--storage-root`：Zotero storage 根目录
+- `--output-root`：输出目录
+- `--item-key`：仅处理单条目目录
+- `--self-check` / `--self-check-only`：运行前自检
+- `--sample-size`：抽样处理数量
+- `--parallel-workers`：论文级并行数
+- `--gpu-mode`：GPU 调度模式
+- `--gpu-devices`：GPU 设备列表
+- `--retry-attempts`：失败重试次数
+- `--force-reprocess`：强制重跑
+- `--no-resume`：禁用断点续跑
+- `--strict-fail`：遇失败返回非零
+- `--disable-vision`：关闭图像分析
+- `--no-progress`：关闭进度条
+- `--log-level`：日志级别
 
 ## 许可证说明
 

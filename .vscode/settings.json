@@ -9,6 +9,14 @@
         "/^\\$env:PYTHONPATH='C:\\\\Users\\\\YangK\\\\AppData\\\\Roaming\\\\Python\\\\Python311\\\\site-packages;E:\\\\Document\\\\KES-for-Zotero\\\\src'; E:/program/anaconda3/Scripts/conda\\.exe run -n yk_quan --no-capture-output python -m kes_for_zotero --config config\\.example\\.json --item-key 23QMG87U --disable-vision --log-level INFO$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^conda run -n yk_seq python -m kes_for_zotero\\.cli --help$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^conda run -n yk_seq python -V; conda run -n yk_seq python -m pip install -e \\.; conda run -n yk_seq python -m pip show marker-pdf; conda run -n yk_seq python -m pip show kes-for-zotero$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }
