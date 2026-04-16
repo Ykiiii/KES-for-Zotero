@@ -188,6 +188,80 @@ class PipelineRunModeTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     run_pipeline(config)
 
+    def test_run_pipeline_degrades_when_vision_is_slow_or_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            item_dir = storage / "ITEMV"
+            item_dir.mkdir(parents=True)
+            pdf = item_dir / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n%fake")
+
+            output = root / "output"
+            output.mkdir(parents=True)
+
+            image_path = output / "seed.png"
+            image_path.write_bytes(PNG_1X1)
+
+            item = ZoteroItem(
+                item_key="ITEMV",
+                citation_key="doe2024vision",
+                title="Vision Paper",
+                year="2024",
+                first_author="doe",
+                item_dir=item_dir,
+                pdf_files=[pdf],
+                related_files=[],
+            )
+            config = self._base_config(storage, output, strict_fail=False)
+            config.vision = VisionSettings(enabled=True, max_failures_per_pdf=1, max_analysis_seconds_per_pdf=30)
+
+            class SuccessMarker:
+                def __init__(self, _settings: MarkerSettings) -> None:
+                    pass
+
+                def extract(self, pdf_path: Path, item_output_dir: Path):
+                    marker_dir = item_output_dir / "marker"
+                    marker_dir.mkdir(parents=True, exist_ok=True)
+                    marker_path = marker_dir / f"{pdf_path.stem}.marker.md"
+                    marker_path.write_text("# Marker", encoding="utf-8")
+                    from kes_for_zotero.models import MarkerResult
+
+                    return MarkerResult(
+                        pdf_path=pdf_path,
+                        markdown_path=marker_path,
+                        markdown="# Marker",
+                        metadata={},
+                        images=[
+                            ExtractedImage(
+                                path=image_path,
+                                relative_path="seed.png",
+                                width=20,
+                                height=20,
+                                context_excerpt="figure",
+                            )
+                        ],
+                    )
+
+                def candidate_images(self, result, _vision):
+                    return list(result.images)
+
+            class SlowVisionClient:
+                def __init__(self, _settings: VisionSettings) -> None:
+                    pass
+
+                def analyze_image(self, _image: ExtractedImage, _document_name: str):
+                    raise TimeoutError("simulated timeout")
+
+            with mock.patch("kes_for_zotero.pipeline.scan_storage", return_value=[item]), mock.patch(
+                "kes_for_zotero.pipeline.MarkerExtractor", SuccessMarker
+            ), mock.patch("kes_for_zotero.pipeline.OllamaVisionClient", SlowVisionClient):
+                manifest = run_pipeline(config)
+
+            self.assertEqual(manifest["items"][0]["status"], "ok")
+            self.assertEqual(manifest["items"][0]["pdfs"][0]["status"], "ok")
+            self.assertEqual(manifest["items"][0]["pdfs"][0]["level2_images"], 0)
+
     def test_run_pipeline_resume_skips_completed_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -243,6 +317,50 @@ class PipelineRunModeTests(unittest.TestCase):
             self.assertEqual(result_manifest["items"][0]["status"], "ok")
             self.assertTrue((output / "papper" / "doe2024cached" / "index.md").exists())
             self.assertTrue((output / "papper" / "doe2024cached" / "doe2024cached.index.md").exists())
+
+    def test_run_pipeline_resume_skips_completed_pdf_by_disk_cache_without_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            item_dir = storage / "ITEM002"
+            item_dir.mkdir(parents=True)
+            pdf = item_dir / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n%fake")
+
+            output = root / "output"
+            marker_dir = output / "papper" / "doe2024cached" / "marker"
+            marker_dir.mkdir(parents=True, exist_ok=True)
+            (marker_dir / "paper.marker.md").write_text("# Cached marker content", encoding="utf-8")
+
+            item = ZoteroItem(
+                item_key="ITEM002",
+                citation_key="doe2024cached",
+                title="Cached Paper",
+                year="2024",
+                first_author="doe",
+                item_dir=item_dir,
+                pdf_files=[pdf],
+                related_files=[],
+            )
+            config = self._base_config(storage, output, strict_fail=False)
+
+            class ShouldNotRunMarker:
+                def __init__(self, _settings: MarkerSettings) -> None:
+                    pass
+
+                def extract(self, _pdf_path: Path, _item_output_dir: Path):
+                    raise AssertionError("resume should skip already successful pdf by disk cache")
+
+                def candidate_images(self, _result, _vision):
+                    return []
+
+            with mock.patch("kes_for_zotero.pipeline.scan_storage", return_value=[item]), mock.patch(
+                "kes_for_zotero.pipeline.MarkerExtractor", ShouldNotRunMarker
+            ):
+                result_manifest = run_pipeline(config)
+
+            self.assertEqual(result_manifest["items"][0]["status"], "ok")
+            self.assertEqual(result_manifest["items"][0]["pdfs"][0]["resume_source"], "disk")
 
     def test_run_pipeline_builds_index_for_item_without_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -378,6 +496,61 @@ class PipelineRunModeTests(unittest.TestCase):
 
             self.assertEqual(len(manifest["items"]), 1)
             self.assertEqual(manifest["items"][0]["item_key"], "ITEMA")
+
+    def test_run_pipeline_continues_after_item_level_exception_and_writes_unfinished_units(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            output = root / "output"
+            output.mkdir(parents=True)
+
+            item_a_dir = storage / "ITEMA"
+            item_b_dir = storage / "ITEMB"
+            item_a_dir.mkdir(parents=True)
+            item_b_dir.mkdir(parents=True)
+
+            item_a = ZoteroItem(
+                item_key="ITEMA",
+                citation_key="doe2024a",
+                title="A",
+                year="2024",
+                first_author="doe",
+                item_dir=item_a_dir,
+                pdf_files=[],
+                related_files=[],
+            )
+            item_b = ZoteroItem(
+                item_key="ITEMB",
+                citation_key="doe2024b",
+                title="B",
+                year="2024",
+                first_author="doe",
+                item_dir=item_b_dir,
+                pdf_files=[],
+                related_files=[],
+            )
+            config = self._base_config(storage, output, strict_fail=False)
+            config.run.parallel_workers = 2
+
+            original_process_item = __import__("kes_for_zotero.pipeline", fromlist=["_process_single_item"])._process_single_item
+
+            def _crash_first_item(*args, **kwargs):
+                item = kwargs["item"]
+                if item.item_key == "ITEMA":
+                    raise RuntimeError("simulated item crash")
+                return original_process_item(*args, **kwargs)
+
+            with mock.patch("kes_for_zotero.pipeline.scan_storage", return_value=[item_a, item_b]), mock.patch(
+                "kes_for_zotero.pipeline._process_single_item", side_effect=_crash_first_item
+            ):
+                manifest = run_pipeline(config)
+
+            items_by_key = {entry["item_key"]: entry for entry in manifest["items"]}
+            self.assertEqual(items_by_key["ITEMA"]["status"], "failed")
+            self.assertEqual(items_by_key["ITEMB"]["status"], "indexed-only")
+
+            unfinished_units = json.loads((output / "unfinished_units.json").read_text(encoding="utf-8"))
+            self.assertTrue(any(unit.get("item_key") == "ITEMA" for unit in unfinished_units["unfinished_units"]))
 
 
 if __name__ == "__main__":

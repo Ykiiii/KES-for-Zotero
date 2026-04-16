@@ -24,6 +24,9 @@ class VisionSettings:
     base_url: str = "http://127.0.0.1:11434"
     model: str = "gemma4"
     temperature: float = 0.1
+    request_timeout_seconds: int = 180
+    max_failures_per_pdf: int = 3
+    max_analysis_seconds_per_pdf: int = 900
     include_level3: bool = False
     max_candidate_images: int = 24
     min_image_area: int = 50_000
@@ -147,6 +150,18 @@ def build_config(
         base_url=vision_config.get("base_url", marker.ollama_base_url),
         model=vision_config.get("model", item_model or marker.ollama_model),
         temperature=vision_config.get("temperature", 0.1),
+        request_timeout_seconds=max(
+            1,
+            int(vision_config.get("request_timeout_seconds", 180)),
+        ),
+        max_failures_per_pdf=max(
+            1,
+            int(vision_config.get("max_failures_per_pdf", 3)),
+        ),
+        max_analysis_seconds_per_pdf=max(
+            1,
+            int(vision_config.get("max_analysis_seconds_per_pdf", 900)),
+        ),
         include_level3=include_level3 if include_level3 is not None else vision_config.get("include_level3", False),
         max_candidate_images=vision_config.get("max_candidate_images", 24),
         min_image_area=vision_config.get("min_image_area", 50_000),

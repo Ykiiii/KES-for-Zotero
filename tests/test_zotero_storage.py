@@ -11,7 +11,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from kes_for_zotero.zotero_storage import build_related_file, read_text_preview, scan_storage
+from kes_for_zotero.zotero_storage import build_citation_key, build_related_file, read_text_preview, scan_storage
 
 
 class ZoteroStoragePreviewTests(unittest.TestCase):
@@ -67,6 +67,53 @@ class ZoteroStoragePreviewTests(unittest.TestCase):
 
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].citation_key, "doe2024graph")
+
+    def test_build_citation_key_uses_auth_year_shorttitle(self) -> None:
+        key = build_citation_key(
+            first_author="Smith",
+            year="2020",
+            title="Deep Learning for Robotics",
+            fallback="ABCD1234",
+        )
+        self.assertEqual(key, "smith2020deep")
+
+    def test_scan_storage_parses_pdf_filename_for_bbt_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp) / "storage"
+            item_dir = storage / "ITEM002"
+            item_dir.mkdir(parents=True)
+
+            pdf_path = item_dir / "Xiao 等 - 2018 - Design and evaluation of a 7-DOF cable-driven upper limb exoskeleton.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n%fake")
+
+            items = scan_storage(storage)
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].first_author, "xiao")
+            self.assertEqual(items[0].year, "2018")
+            self.assertEqual(items[0].title, "Design and evaluation of a 7-DOF cable-driven upper limb exoskeleton")
+            self.assertEqual(items[0].citation_key, "xiao2018design")
+
+    def test_scan_storage_records_html_and_zotero_files_without_processing_html(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp) / "storage"
+            item_dir = storage / "ITEM003"
+            item_dir.mkdir(parents=True)
+
+            (item_dir / "12345678.html").write_text("<html><body>snapshot</body></html>", encoding="utf-8")
+            (item_dir / ".zotero-ft-info").write_text(
+                "Title: Sample Paper\nAuthor: Jane Doe\nCreationDate: 2024-03-10\n",
+                encoding="utf-8",
+            )
+
+            items = scan_storage(storage)
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].pdf_files, [])
+            self.assertEqual(len(items[0].related_files), 2)
+            related_kinds = {related.kind for related in items[0].related_files}
+            self.assertIn("snapshot", related_kinds)
+            self.assertIn("zotero-fulltext-info", related_kinds)
 
 
 if __name__ == "__main__":

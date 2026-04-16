@@ -16,6 +16,9 @@
     "base_url": "http://127.0.0.1:80",
     "model": "gemma4:latest",
     "temperature": 0.1,
+    "request_timeout_seconds": 180,
+    "max_failures_per_pdf": 3,
+    "max_analysis_seconds_per_pdf": 900,
     "include_level3": false,
     "max_candidate_images": 24,
     "min_image_area": 50000,
@@ -45,13 +48,13 @@
   "run": {
     "resume": true,
     "show_progress": true,
-    "retry_attempts": 1,
+    "retry_attempts": 2,
     "force_reprocess": false,
     "strict_fail": false,
-    "parallel_workers": 2,
+    "parallel_workers": 4,
     "suppress_internal_progress": true,
-    "sample_size": 10,
+    "sample_size": null,
     "gpu_mode": "round-robin",
-    "gpu_devices": [0, 1]
+    "gpu_devices": [0, 1, 2, 3]
   }
 }

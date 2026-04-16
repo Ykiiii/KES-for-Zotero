@@ -211,11 +211,14 @@ def derive_bibliographic_metadata(related_files: list[ZoteroRelatedFile], pdf_fi
     if not title and cache is not None:
         title = cache.structured_fields.get("detected_title", "")
 
-    if not title and pdf_files:
-        title = pdf_files[0].stem
-
-    if not year and pdf_files:
-        year = extract_year(pdf_files[0].stem)
+    if pdf_files:
+        pdf_title, pdf_year, pdf_first_author = parse_pdf_filename_metadata(pdf_files[0].stem)
+        if not title:
+            title = pdf_title
+        if not year:
+            year = pdf_year
+        if not first_author:
+            first_author = pdf_first_author
 
     return title or "Untitled", year, first_author
 
@@ -243,7 +246,7 @@ def extract_year(text: str | None) -> str | None:
 
 
 def build_citation_key(first_author: str | None, year: str | None, title: str, fallback: str) -> str:
-    # Better BibTeX-like pattern: auth.lower + year + shorttitle(1,1).
+    # Better BibTeX-like pattern: [auth][year][shorttitle].
     author_part = normalize_key_token(first_author or "anon")
     year_part = year or "nodate"
     shorttitle_part = extract_short_title_token(title)
@@ -273,6 +276,33 @@ def extract_short_title_token(title: str) -> str:
         if token not in stopwords:
             return token
     return "item"
+
+
+def parse_pdf_filename_metadata(stem: str) -> tuple[str, str | None, str | None]:
+    parts = [part.strip() for part in stem.split(" - ")]
+    if len(parts) >= 3:
+        author_part = parts[0]
+        year_part = extract_year(parts[1])
+        title_part = " - ".join(parts[2:]).strip()
+        first_author = extract_first_author_from_filename(author_part)
+        if title_part:
+            return title_part, year_part, first_author
+    return stem, extract_year(stem), extract_first_author_from_filename(stem)
+
+
+def extract_first_author_from_filename(text: str) -> str | None:
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = normalized.replace("et al.", " ")
+    normalized = normalized.replace("et al", " ")
+    normalized = normalized.replace("等", " ")
+    normalized = normalized.replace("和", " ")
+    normalized = normalized.replace("&", " ")
+    normalized = normalized.replace(" and ", " ")
+    tokens = re.findall(r"[A-Za-z]+", normalized)
+    if not tokens:
+        return None
+    return normalize_key_token(tokens[0]) or None
 
 
 def normalize_key_token(value: str) -> str:

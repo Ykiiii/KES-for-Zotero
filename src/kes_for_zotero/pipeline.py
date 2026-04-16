@@ -94,7 +94,7 @@ def run_pipeline(config: AppConfig, item_key: str | None = None) -> dict:
     any_failure = False
     catalog_rows: list[dict[str, str]] = []
 
-    def submit_payload(item_index: int, item: ZoteroItem) -> tuple[ZoteroItem, str, dict[str, Any] | None]:
+    def submit_payload(item_index: int, item: ZoteroItem) -> tuple[ZoteroItem, str, dict[str, Any]]:
         previous_item_record = item_records.get(item.item_key)
         output_dir_name = output_names[item.item_key]
         gpu_id = _select_gpu_id(config, item_index)
@@ -116,7 +116,19 @@ def run_pipeline(config: AppConfig, item_key: str | None = None) -> dict:
                     for item_index, item in enumerate(items)
                 }
                 for future in as_completed(future_map):
-                    item, output_dir_name, item_record = future.result()
+                    item = future_map[future]
+                    output_dir_name = output_names[item.item_key]
+                    try:
+                        item, output_dir_name, item_record = future.result()
+                    except Exception as exc:
+                        LOGGER.exception("Failed to process paper %s (%s)", item.citation_key, item.item_key)
+                        item_record = _build_item_failure_record(
+                            item=item,
+                            output_dir_name=output_dir_name,
+                            previous_item_record=item_records.get(item.item_key),
+                            gpu_id=None,
+                            error=exc,
+                        )
                     any_failure = _finalize_item_record(
                         item=item,
                         output_dir_name=output_dir_name,
@@ -128,9 +140,21 @@ def run_pipeline(config: AppConfig, item_key: str | None = None) -> dict:
                     )
                     progress.update(1)
                     _write_manifest(config.manifest_path, manifest)
+                    _write_checkpoint_outputs(config.output_root, items, manifest)
         else:
             for item_index, item in enumerate(items):
-                item, output_dir_name, item_record = submit_payload(item_index, item)
+                output_dir_name = output_names[item.item_key]
+                try:
+                    item, output_dir_name, item_record = submit_payload(item_index, item)
+                except Exception as exc:
+                    LOGGER.exception("Failed to process paper %s (%s)", item.citation_key, item.item_key)
+                    item_record = _build_item_failure_record(
+                        item=item,
+                        output_dir_name=output_dir_name,
+                        previous_item_record=item_records.get(item.item_key),
+                        gpu_id=None,
+                        error=exc,
+                    )
                 any_failure = _finalize_item_record(
                     item=item,
                     output_dir_name=output_dir_name,
@@ -142,10 +166,12 @@ def run_pipeline(config: AppConfig, item_key: str | None = None) -> dict:
                 )
                 progress.update(1)
                 _write_manifest(config.manifest_path, manifest)
+                _write_checkpoint_outputs(config.output_root, items, manifest)
     finally:
         progress.close()
 
     _write_catalog_index(index_root, catalog_rows)
+    _write_unfinished_units(config.output_root, items, manifest)
     _write_run_stats(config.output_root, items, manifest)
 
     if config.run.strict_fail and any_failure:
@@ -207,16 +233,30 @@ def _process_single_item(
         for pdf_path in item.pdf_files:
             item_progress.set_postfix_text(pdf_path.name)
             existing_pdf_record = pdf_record_map.get(pdf_path.name)
+            disk_completed = _is_pdf_completed_on_disk(pdf_path, item_output_dir)
             should_skip = (
                 config.run.resume
                 and not config.run.force_reprocess
-                and existing_pdf_record is not None
-                and existing_pdf_record.get("status") == "ok"
+                and (
+                    (existing_pdf_record is not None and existing_pdf_record.get("status") == "ok")
+                    or disk_completed
+                )
             )
 
             if should_skip:
                 LOGGER.info("Resuming: skip completed PDF %s for %s", pdf_path.name, item.citation_key)
-                item_record["pdfs"].append(existing_pdf_record)
+                if existing_pdf_record is not None and existing_pdf_record.get("status") == "ok":
+                    item_record["pdfs"].append(existing_pdf_record)
+                else:
+                    item_record["pdfs"].append(
+                        {
+                            "file": pdf_path.name,
+                            "status": "ok",
+                            "level2_images": 0,
+                            "level3_images": 0,
+                            "resume_source": "disk",
+                        }
+                    )
                 cached_doc = _load_cached_document(pdf_path, item_output_dir)
                 if cached_doc is not None:
                     processed_documents.append(cached_doc)
@@ -298,12 +338,40 @@ def _process_single_pdf(
         )
         processed = ProcessedDocument(marker=marker_result)
         if vision is not None:
+            vision_failures = 0
+            started_at = time.monotonic()
             for image in marker.candidate_images(marker_result, config.vision):
-                analysis = _run_with_retries(
-                    lambda: vision.analyze_image(image, pdf_path.name),
-                    attempts=attempts,
-                    action=f"vision analysis for {pdf_path.name}:{image.path.name}",
-                )
+                elapsed = int(time.monotonic() - started_at)
+                if elapsed >= config.vision.max_analysis_seconds_per_pdf:
+                    LOGGER.warning(
+                        "Vision analysis budget exceeded for %s (%ss), skip remaining images.",
+                        pdf_path.name,
+                        config.vision.max_analysis_seconds_per_pdf,
+                    )
+                    break
+                try:
+                    analysis = _run_with_retries(
+                        lambda: vision.analyze_image(image, pdf_path.name),
+                        attempts=attempts,
+                        action=f"vision analysis for {pdf_path.name}:{image.path.name}",
+                    )
+                except Exception as exc:
+                    vision_failures += 1
+                    LOGGER.warning(
+                        "Skip image %s for %s due to vision error (%s/%s): %s",
+                        image.path.name,
+                        pdf_path.name,
+                        vision_failures,
+                        config.vision.max_failures_per_pdf,
+                        exc,
+                    )
+                    if vision_failures >= config.vision.max_failures_per_pdf:
+                        LOGGER.warning(
+                            "Vision failures reached threshold for %s, skip remaining images.",
+                            pdf_path.name,
+                        )
+                        break
+                    continue
                 if analysis.keep and analysis.level == "level2":
                     processed.level2_images.append((image, analysis))
                 elif analysis.keep and analysis.level == "level3" and config.vision.include_level3:
@@ -409,6 +477,39 @@ def _load_cached_document(pdf_path: Path, item_output_dir: Path) -> ProcessedDoc
         conclusion=None,
     )
     return ProcessedDocument(marker=marker_result)
+
+
+def _is_pdf_completed_on_disk(pdf_path: Path, item_output_dir: Path) -> bool:
+    marker_path = item_output_dir / "marker" / f"{pdf_path.stem}.marker.md"
+    return marker_path.exists()
+
+
+def _build_item_failure_record(
+    *,
+    item: ZoteroItem,
+    output_dir_name: str,
+    previous_item_record: dict[str, Any] | None,
+    gpu_id: int | None,
+    error: Exception,
+) -> dict[str, Any]:
+    previous_pdfs = []
+    if isinstance(previous_item_record, dict):
+        raw_pdfs = previous_item_record.get("pdfs", [])
+        if isinstance(raw_pdfs, list):
+            previous_pdfs = [entry for entry in raw_pdfs if isinstance(entry, dict)]
+
+    return {
+        "item_key": item.item_key,
+        "citation_key": item.citation_key,
+        "title": item.title,
+        "year": item.year,
+        "output_dir": output_dir_name,
+        "gpu_id": gpu_id,
+        "pdfs": previous_pdfs,
+        "status": "failed",
+        "pdf_status": "present" if item.pdf_files else "missing",
+        "error": str(error),
+    }
 
 
 def _create_progress(total: int, enabled: bool) -> _ProgressHandle:
@@ -544,12 +645,83 @@ def _write_run_stats(output_root: Path, scanned_items: list[ZoteroItem], manifes
         "processed_items": len(manifest.get("items", [])),
         "pdf_ok": ok_pdf,
         "pdf_failed": failed_pdf,
+        "unfinished_units_count": len(_collect_unfinished_units(scanned_items, manifest)),
     }
 
     (output_root / "run_stats.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _write_unfinished_units(output_root: Path, scanned_items: list[ZoteroItem], manifest: dict[str, Any]) -> None:
+    payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+        "unfinished_units": _collect_unfinished_units(scanned_items, manifest),
+    }
+    (output_root / "unfinished_units.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_checkpoint_outputs(output_root: Path, scanned_items: list[ZoteroItem], manifest: dict[str, Any]) -> None:
+    _write_unfinished_units(output_root, scanned_items, manifest)
+    _write_run_stats(output_root, scanned_items, manifest)
+
+
+def _collect_unfinished_units(scanned_items: list[ZoteroItem], manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    scanned_by_key = {item.item_key: item for item in scanned_items}
+    manifest_items = {
+        entry.get("item_key"): entry
+        for entry in manifest.get("items", [])
+        if isinstance(entry, dict) and isinstance(entry.get("item_key"), str)
+    }
+
+    for item_key, item in scanned_by_key.items():
+        if item_key not in manifest_items:
+            units.append(
+                {
+                    "scope": "item",
+                    "item_key": item.item_key,
+                    "citation_key": item.citation_key,
+                    "status": "missing-in-manifest",
+                    "reason": "item not present in manifest",
+                }
+            )
+
+    for item_key, entry in manifest_items.items():
+        item_status = str(entry.get("status") or "")
+        if item_status in {"failed", "partial-failure"}:
+            units.append(
+                {
+                    "scope": "item",
+                    "item_key": item_key,
+                    "citation_key": entry.get("citation_key", ""),
+                    "status": item_status,
+                    "reason": entry.get("error", "item has failed or partially failed PDFs"),
+                }
+            )
+
+        for pdf_entry in entry.get("pdfs", []):
+            if not isinstance(pdf_entry, dict):
+                continue
+            pdf_status = str(pdf_entry.get("status") or "")
+            if pdf_status == "ok":
+                continue
+            units.append(
+                {
+                    "scope": "pdf",
+                    "item_key": item_key,
+                    "citation_key": entry.get("citation_key", ""),
+                    "file": pdf_entry.get("file", ""),
+                    "status": pdf_status or "unknown",
+                    "reason": pdf_entry.get("error", "pdf not completed"),
+                }
+            )
+
+    return units
 
 
 def _assign_output_dir_names(items: list[ZoteroItem]) -> dict[str, str]:

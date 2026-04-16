@@ -1,6 +1,6 @@
 # KES-for-Zotero
 
-一个面向 Zotero storage 目录的本地知识抽取脚本项目。它会扫描每个 Zotero 条目目录中的 PDF 与相关 Zotero 文件，调用 Marker 提取正文、公式、表格，再用本地 gemma4 视觉模型筛选和概述关键图像，最终为每个条目生成一个整合后的 Markdown 文件。
+一个面向 Zotero storage 目录的本地知识抽取脚本项目。它会扫描每个 Zotero 条目目录中的 PDF 与相关 Zotero 文件，调用 Marker 提取正文、公式、表格，再用本地 gemma4 视觉模型筛选和概述关键图像，最终为每个条目生成一个整合后的 Markdown 文件，方便 Karpathy 知识库架构的信息抽取。
 
 ## 目标能力
 
@@ -54,6 +54,8 @@ kes-zotero --storage-root E:/Zotero/storage --output-root ./output
 ```bash
 kes-zotero --config config.example.json
 ```
+
+默认行为：不传 `--sample-size` 时会处理 `storage_root` 下扫描到的全部论文。
 
 建议首次先做抽样测试（例如 10 篇）：
 
@@ -174,12 +176,63 @@ kes-zotero --config config.example.json --parallel-workers 4 --gpu-mode round-ro
 kes-zotero --config config.example.json --force-reprocess --strict-fail
 ```
 
+如果进程中断（如终端关闭、主机重启、运行时异常），建议按下面步骤恢复：
+
+1. 先查看未完成清单：`output/unfinished_units.json`
+2. 默认续跑（会跳过已完成单元）：
+
+```bash
+kes-zotero --config config.example.json --retry-attempts 2
+```
+
+3. 仅重跑单条目：
+
+```bash
+kes-zotero --config config.example.json --item-key <item_key> --force-reprocess
+```
+
+4. 需要彻底重建时再使用：
+
+```bash
+kes-zotero --config config.example.json --no-resume --force-reprocess
+```
+
 输出检索入口：
 
 - 总索引：`output/index/index.md`
 - 单篇聚合入口：`output/index/<citation-key>.md`
 - 论文目录：`output/papper/<citation-key>/`
 - 运行统计：`output/run_stats.json`
+- 未完成单元清单：`output/unfinished_units.json`
+
+### citation_key 生成规则
+
+项目按接近 Better BibTeX 的模板生成 citation_key：
+
+- 模板：`[auth][year][shorttitle]`
+- `auth`：第一作者姓氏，归一化为小写字母数字
+- `year`：四位年份，缺失时使用 `nodate`
+- `shorttitle`：标题的第一个有效词（去停用词），如 `Deep Learning for Robotics` -> `deep`
+
+示例：
+
+- 作者 `Smith`，年份 `2020`，标题 `Deep Learning for Robotics`
+- 生成：`smith2020deep`
+- 作者 `Xiao`，年份 `2018`，标题 `Design and evaluation of a 7-DOF cable-driven upper limb exoskeleton`
+- 生成：`xiao2018design`
+
+说明：
+
+- 若作者缺失，会使用 `anon`，例如 `anon2024controlsystem`
+- 若标题无法提取有效词，会使用 `item`
+- 若不同条目生成同名 citation_key，程序会在输出目录名上追加 item_key 防冲突
+
+### storage 文件类型处理规则
+
+- `pdf`：作为主处理对象，进入 Marker 解析与后续图像分析流程
+- `.zotero-ft-info`、`.zotero-ft-cache`：作为 Zotero 文件解析并记录到输出 Markdown
+- `html` / `htm`：作为快照文件仅记录，不进入 PDF 解析流程
+- 其他附件：仅记录文件名、类型、大小和可读预览（如果可提取）
 
 ## 输出结构
 
@@ -206,6 +259,8 @@ kes-zotero --config config.example.json --force-reprocess --strict-fail
 - 有 PDF / 无 PDF 条目数量与清单
 - PDF 成功与失败计数
 
+另外会生成 `unfinished_units.json`，用于记录当前尚未完成的条目/文献单元，适合中断后续跑排查。
+
 ## 配置说明
 
 项目默认使用 Marker 的 Python API，并通过 Ollama 接入本地模型：
@@ -216,6 +271,26 @@ kes-zotero --config config.example.json --force-reprocess --strict-fail
 另外，Marker 底层依赖的版面分析与 OCR 模型仍需本地缓存。默认缓存目录可通过 `marker.model_cache_dir` 配置到项目内，例如 `./.cache-marker/models`。
 
 如果你不希望 Vision LLM 处理图像，可增加 `--disable-vision`。
+
+若 Ollama 本地模型返回较慢，建议启用以下策略（已内置）：
+
+- 请求超时：单次视觉请求超过 `vision.request_timeout_seconds` 即超时
+- 单 PDF 时间预算：超过 `vision.max_analysis_seconds_per_pdf` 后跳过剩余图像
+- 失败阈值降级：单 PDF 视觉失败达到 `vision.max_failures_per_pdf` 后跳过剩余图像
+- 失败不阻断 PDF：视觉慢/失败不会让整篇 PDF 转换失败，仅减少 Level 2/3 图像输出
+
+推荐慢模型配置：
+
+```json
+{
+	"vision": {
+		"request_timeout_seconds": 120,
+		"max_failures_per_pdf": 2,
+		"max_analysis_seconds_per_pdf": 300,
+		"max_candidate_images": 8
+	}
+}
+```
 
 若出现 TensorFlow oneDNN 提示（`TF_ENABLE_ONEDNN_OPTS`），程序会默认设置为关闭优化并降低日志级别，避免重复报警。
 
@@ -246,6 +321,13 @@ kes-zotero --config config.example.json --self-check --retry-attempts 2
 - `--gpu-mode {single,round-robin}`：多 GPU 调度模式
 - `--gpu-devices 0,1,...`：指定可用 GPU 设备列表
 
+视觉慢响应相关配置（`vision` 节）：
+
+- `request_timeout_seconds`：单次 Ollama 请求超时时间（秒）
+- `max_failures_per_pdf`：单篇 PDF 可容忍的视觉失败次数
+- `max_analysis_seconds_per_pdf`：单篇 PDF 视觉分析总预算（秒）
+- `max_candidate_images`：每篇 PDF 最多送入视觉模型的候选图像数
+
 ## 参数速查
 
 - `--config`：配置文件路径
@@ -264,6 +346,12 @@ kes-zotero --config config.example.json --self-check --retry-attempts 2
 - `--disable-vision`：关闭图像分析
 - `--no-progress`：关闭进度条
 - `--log-level`：日志级别
+
+配置默认建议（见 `config.example.json`）：
+
+- `run.sample_size: null`（全量处理）
+- `run.parallel_workers: 1`（先单线程稳定跑）
+- `run.gpu_mode: single`、`run.gpu_devices: []`（仅在需要时再启用多 GPU）
 
 ## 许可证说明
 

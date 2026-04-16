@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 from pathlib import Path
 from urllib import error, request
 
@@ -67,9 +68,21 @@ class OllamaVisionClient:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=180) as response:
+            with request.urlopen(req, timeout=self.settings.request_timeout_seconds) as response:
                 body = response.read().decode("utf-8")
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Ollama request timed out after {self.settings.request_timeout_seconds}s: {endpoint}"
+            ) from exc
+        except socket.timeout as exc:
+            raise TimeoutError(
+                f"Ollama request timed out after {self.settings.request_timeout_seconds}s: {endpoint}"
+            ) from exc
         except error.URLError as exc:
+            if isinstance(getattr(exc, "reason", None), (TimeoutError, socket.timeout)):
+                raise TimeoutError(
+                    f"Ollama request timed out after {self.settings.request_timeout_seconds}s: {endpoint}"
+                ) from exc
             raise RuntimeError(f"Failed to reach Ollama endpoint: {endpoint}") from exc
 
         parsed = json.loads(body)
